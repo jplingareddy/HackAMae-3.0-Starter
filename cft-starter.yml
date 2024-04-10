@@ -1,0 +1,669 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Hackamae Starter Stack
+
+Parameters:
+  VPC:
+    Type: String
+  Subnet1:
+    Type: String
+  Subnet2:
+    Type: String
+  SecurityGroup:
+    Type: String
+  AMI:
+    Type: String
+    Default: ami-07761f3ae34c4478d
+  TeamNumber:
+    Type: String
+
+Resources:
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Enabled: true
+      EnableKeyRotation: true
+
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub 'Team${TeamNumber}'
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'Team${TeamNumber}-alb-sg'
+      GroupDescription: Allow HTTP from anywhere
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'Team${TeamNumber}-ec2-sg'
+      GroupDescription: Allow HTTP from ALB only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref ALBSecurityGroup
+        
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'Team${TeamNumber}-efs-sg'
+      GroupDescription: Allow EC2 to mount EFS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        SourceSecurityGroupId: !Ref EC2SecurityGroup
+
+  EFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      KmsKeyId: !Ref KmsKey
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-efs'
+        - Key: CustomTag
+          Value: CustomTagEfs
+
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFS
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-efs-ap'
+        - Key: CustomTag
+          Value: CustomTagEfsAccessPoint
+
+  EFSTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFS
+      SubnetId: !Ref Subnet1
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+      
+  EFSTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFS
+      SubnetId: !Ref Subnet2
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+
+  EC2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub 'Team${TeamNumber}-ec2-template'
+      LaunchTemplateData:
+        ImageId: !Ref AMI
+        InstanceType: t2.micro
+        KeyName: !Ref KeyPair
+        IamInstanceProfile: 
+          Name: MyEC2AdminRole 
+        NetworkInterfaces: 
+          - DeviceIndex: 0
+            Groups:
+              - !Ref EC2SecurityGroup
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub 'Team${TeamNumber}-ec2'
+              - Key: CustomTag
+                Value: CustomTagEC2          
+        UserData: 
+          Fn::Base64: !Sub |
+            #!/bin/sh
+            yum update -y
+            yum install amazon-efs-utils jq httpd php java-17-amazon-corretto -y
+  
+            INSTANCE_ID=$(ec2-metadata -i | awk '{print $2}')
+            AMI_ID=$(ec2-metadata -a | awk '{print $2}')
+            aws configure set region ${AWS::Region}
+            aws ec2 modify-instance-metadata-options --instance-id $INSTANCE_ID --http-tokens required
+            AMI_DESCRIPTION=$(aws ec2 describe-images --image-id $AMI_ID | jq -r '.Images[0].Description')
+            INSTANCE_DETAIL=$(aws ec2 describe-instances --instance-id $INSTANCE_ID | jq '.Reservations[0].Instances[0]')
+            INSTANCE_TYPE=$(ec2-metadata -t | awk '{print $2}')
+            VPC_ID=$(echo $INSTANCE_DETAIL | jq -r '.VpcId')
+            SUBNET_ID=$(echo $INSTANCE_DETAIL | jq -r '.SubnetId')
+            AVAILABILITY_ZONE=$(ec2-metadata -z | awk '{print $2}')
+            IP_ADDRESSES=$(aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].NetworkInterfaces[].PrivateIpAddresses[].PrivateIpAddress' --output text)
+  
+            mkdir -p /export/appl/data
+            mkfs -t xfs /dev/xvdb
+            echo "/dev/xvdb /export/appl/data xfs defaults,nofail 0 2" >> /etc/fstab
+            mount -a
+            
+            echo "test data file for EBS root volume created at $(date)" > /readme.txt
+            echo "test data file for EBS data volume created at $(date)" > /export/appl/data/readme.txt
+
+            cd /export/appl/data
+            wget https://github.com/r2ucrk/HackAMae-3.0-Starter/raw/main/resources/hello.jar
+  
+            SERVICE=/etc/systemd/system/spring-boot-hello.service
+            echo "[Unit]" >> $SERVICE
+            echo "Description=SpringBoot Hello" >> $SERVICE
+            echo "After=syslog.target" >> $SERVICE
+            echo "[Service]" >> $SERVICE
+            echo "User=ec2-user" >> $SERVICE
+            echo "ExecStart=/bin/java -jar /export/appl/data/hello.jar" >> $SERVICE
+            echo "Restart=always" >> $SERVICE
+            echo "RestartSec=5" >> $SERVICE
+            echo "[Install]" >> $SERVICE
+            echo "WantedBy=multi-user.target" >> $SERVICE
+            systemctl enable spring-boot-hello.service
+            systemctl start spring-boot-hello.service
+
+            echo "<html><h1>Hello World</h1></html>" > /var/www/html/index.html
+  
+            OUT=/var/www/html/index.php
+            echo "<?php" >> $OUT
+            echo "\$curl = curl_init();" >> $OUT
+            echo "curl_setopt(\$curl, CURLOPT_URL, 'http://localhost:8090/hello');" >> $OUT
+            echo "curl_setopt(\$curl, CURLOPT_RETURNTRANSFER, 1);" >> $OUT
+            echo "\$hello = curl_exec(\$curl);" >> $OUT
+            echo "curl_close(\$curl);" >> $OUT
+            echo "?>" >> $OUT
+
+            echo "<html><head><title>Hack-a-Mae Status</title></head><body>" >> $OUT
+            echo "<h2>Hack-a-Mae Status</h2>" >> $OUT
+            echo "<h3>AutoScaling EC2</h3>" >> $OUT
+            echo "<h4>$(date)</h4>" >> $OUT
+            
+            echo "<p><table border='1'><tr><th>Parameter</th><th>Value</th></tr>" >> $OUT
+            echo "<tr><td>Instance Id</td><td>$INSTANCE_ID</td></tr>" >> $OUT
+            echo "<tr><td>AMI Id</td><td>$AMI_ID</td></tr>" >> $OUT
+            echo "<tr><td>AMI Description</td><td>$AMI_DESCRIPTION</td></tr>" >> $OUT
+            echo "<tr><td>Instance Type</td><td>$INSTANCE_TYPE</td></tr>" >> $OUT
+            echo "<tr><td>VPC Id</td><td>$VPC_ID</td></tr>" >> $OUT
+            echo "<tr><td>Subnet Id</td><td>$SUBNET_ID</td></tr>" >> $OUT
+            echo "<tr><td>Availability Zone</td><td>$AVAILABILITY_ZONE</td></tr>" >> $OUT
+            echo "<tr><td>Hostname</td><td>$(hostname)</td><tr>" >> $OUT
+            echo "<tr><td>Private IP Addresses</td><td>$IP_ADDRESSES</td></tr>" >> $OUT
+            
+            echo "<tr><td>Security Groups</td><td><table border='1'><tr><th>Name</th><th>Id</th></tr>" >> $OUT
+            aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].SecurityGroups[]' --output text |
+            while read LINE
+            do
+              ID=$(echo $LINE | cut -d ' ' -f 1)
+              NAME=$(echo $LINE | cut -d ' ' -f 2)
+              echo "<tr><td>$NAME</td><td>$ID</td></tr>" >> $OUT
+            done
+            echo "</table></td></tr>" >> $OUT
+            
+            echo "<tr><td>Tags</td><td><table border='1'><tr><th>Name</th><th>Value</th></tr>" >> $OUT
+            aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].Tags[]' --output text | grep -v 'aws:' |
+            while read LINE
+            do
+              NAME=$(echo $LINE | cut -d ' ' -f 1)
+              VALUE=$(echo $LINE | cut -d ' ' -f 2)
+              echo "<tr><td>$NAME</td><td>$VALUE</td></tr>" >> $OUT
+            done
+            echo "</table></td></tr>" >> $OUT
+  
+            echo "<tr><td>EBS Root volume</td><td><?php include '/readme.txt'; ?></td></tr>" >> $OUT
+            echo "<tr><td>EBS Data volume</td><td><?php include '/export/appl/data/readme.txt'; ?></td></tr>" >> $OUT
+            echo "<tr><td>Spring Boot</td><td><?php echo \$hello; ?></td></tr>" >> $OUT
+
+            echo "</table></td></tr>" >> $OUT
+            
+            echo "</table></body></html>" >> $OUT
+            
+            systemctl start httpd
+            systemctl enable httpd
+
+  ALB1:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Name: !Sub 'Team${TeamNumber}-alb1'
+      SecurityGroups:
+      - !Ref ALBSecurityGroup
+      Subnets: 
+      - !Ref Subnet1
+      - !Ref Subnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-alb1'
+        - Key: CustomTag
+          Value: CustomTagALB1
+          
+  ALB1Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALB1TargetGroup
+      LoadBalancerArn: !Ref ALB1
+
+  ALB1TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'Team${TeamNumber}-alb1-tg'
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /index.html
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 20
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-alb1-tg'
+        - Key: CustomTag
+          Value: CustomTagALB1TG
+          
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: 2
+      MaxSize: 5
+      DesiredCapacity: 2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EC2LaunchTemplate
+        Version: !GetAtt EC2LaunchTemplate.LatestVersionNumber
+      HealthCheckType: ELB
+      VPCZoneIdentifier:
+        - !Ref Subnet1
+        - !Ref Subnet2
+      TargetGroupARNs: 
+        - !Ref ALB1TargetGroup
+
+  CpuScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+  ScalingPolicyChange:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      ScalingAdjustment: 1
+
+  CloudWatchAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: 50
+      AlarmDescription: Alarm if CPU higher than 50%
+      Period: 60
+      AlarmActions:
+        - !Ref ScalingPolicyChange
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+
+  ALB2:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Name: !Sub 'Team${TeamNumber}-alb2'
+      SecurityGroups:
+      - !Ref ALBSecurityGroup
+      Subnets: 
+      - !Ref Subnet1
+      - !Ref Subnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-alb2'
+        - Key: CustomTag
+          Value: CustomTagALB2
+
+  ALB2Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALB2TargetGroup
+      LoadBalancerArn: !Ref ALB2
+
+  ALB2TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'Team${TeamNumber}-alb2-tg'
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /index.html
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 20
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      Targets:
+        - Id: !Ref EC2Instance1
+        - Id: !Ref EC2Instance2
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-alb2-tg'
+        - Key: CustomTag
+          Value: CustomTagALB2TG
+
+  EC2Instance1:
+    Type: AWS::EC2::Instance
+    DependsOn: 
+      - EFS
+    Properties:
+      KeyName: !Ref KeyPair
+      ImageId: !Ref AMI
+      InstanceType: t2.micro
+      SubnetId: !Ref Subnet1
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: MyEC2AdminRole 
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            Encrypted: true
+            KmsKeyId: !Ref KmsKey
+        - DeviceName: /dev/sdb
+          Ebs:
+            VolumeSize: 1
+            Encrypted: true
+            KmsKeyId: !Ref KmsKey
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-ec2-1'
+        - Key: CustomTag
+          Value: CustomTagEC2
+      PropagateTagsToVolumeOnCreation: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/sh
+          yum update -y
+          yum install amazon-efs-utils jq httpd php java-17-amazon-corretto -y
+
+          INSTANCE_ID=$(ec2-metadata -i | awk '{print $2}')
+          AMI_ID=$(ec2-metadata -a | awk '{print $2}')
+          aws configure set region ${AWS::Region}
+          aws ec2 modify-instance-metadata-options --instance-id $INSTANCE_ID --http-tokens required
+          AMI_DESCRIPTION=$(aws ec2 describe-images --image-id $AMI_ID | jq -r '.Images[0].Description')
+          INSTANCE_DETAIL=$(aws ec2 describe-instances --instance-id $INSTANCE_ID | jq '.Reservations[0].Instances[0]')
+          INSTANCE_TYPE=$(ec2-metadata -t | awk '{print $2}')
+          VPC_ID=$(echo $INSTANCE_DETAIL | jq -r '.VpcId')
+          SUBNET_ID=$(echo $INSTANCE_DETAIL | jq -r '.SubnetId')
+          AVAILABILITY_ZONE=$(ec2-metadata -z | awk '{print $2}')
+          IP_ADDRESSES=$(aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].NetworkInterfaces[].PrivateIpAddresses[].PrivateIpAddress' --output text)
+
+          mkdir -p /export/appl/data
+          mkfs -t xfs /dev/xvdb
+          echo "/dev/xvdb /export/appl/data xfs defaults,nofail 0 2" >> /etc/fstab
+          mkdir -p /export/appl/data2
+          echo "$(basename ${EFS.Arn}).efs.${AWS::Region}.amazonaws.com:/ /export/appl/data2 efs defaults 0 0" >> /etc/fstab
+          sleep 60
+          mount -a
+          
+          echo "test data file for EBS root volume created at $(date)" > /readme.txt
+          echo "test data file for EBS data volume created at $(date)" > /export/appl/data/readme.txt
+          echo "test data file for EFS data2 volume created at $(date)" > /export/appl/data2/readme.txt
+
+          cd /export/appl/data
+          wget https://github.com/cbkidwell/Hackamae-202404/raw/main/hello.jar
+
+          SERVICE=/etc/systemd/system/spring-boot-hello.service
+          echo "[Unit]" >> $SERVICE
+          echo "Description=SpringBoot Hello" >> $SERVICE
+          echo "After=syslog.target" >> $SERVICE
+          echo "[Service]" >> $SERVICE
+          echo "User=ec2-user" >> $SERVICE
+          echo "ExecStart=/bin/java -jar /export/appl/data/hello.jar" >> $SERVICE
+          echo "Restart=always" >> $SERVICE
+          echo "RestartSec=5" >> $SERVICE
+          echo "[Install]" >> $SERVICE
+          echo "WantedBy=multi-user.target" >> $SERVICE
+          systemctl enable spring-boot-hello.service
+          systemctl start spring-boot-hello.service
+
+          echo "<html><h1>Hello World</h1></html>" > /var/www/html/index.html
+
+          OUT=/var/www/html/index.php
+          echo "<?php" >> $OUT
+          echo "\$curl = curl_init();" >> $OUT
+          echo "curl_setopt(\$curl, CURLOPT_URL, 'http://localhost:8090/hello');" >> $OUT
+          echo "curl_setopt(\$curl, CURLOPT_RETURNTRANSFER, 1);" >> $OUT
+          echo "\$hello = curl_exec(\$curl);" >> $OUT
+          echo "curl_close(\$curl);" >> $OUT
+          echo "?>" >> $OUT
+          
+          echo "<html><head><title>Hack-a-Mae Status</title></head><body>" >> $OUT
+          echo "<h2>Hack-a-Mae Status</h2>" >> $OUT
+          echo "<h3>Standalone EC2</h3>" >> $OUT
+          echo "<h4>$(date)</h4>" >> $OUT
+          
+          echo "<p><table border='1'><tr><th>Parameter</th><th>Value</th></tr>" >> $OUT
+          echo "<tr><td>Instance Id</td><td>$INSTANCE_ID</td></tr>" >> $OUT
+          echo "<tr><td>AMI Id</td><td>$AMI_ID</td></tr>" >> $OUT
+          echo "<tr><td>AMI Description</td><td>$AMI_DESCRIPTION</td></tr>" >> $OUT
+          echo "<tr><td>Instance Type</td><td>$INSTANCE_TYPE</td></tr>" >> $OUT
+          echo "<tr><td>VPC Id</td><td>$VPC_ID</td></tr>" >> $OUT
+          echo "<tr><td>Subnet Id</td><td>$SUBNET_ID</td></tr>" >> $OUT
+          echo "<tr><td>Availability Zone</td><td>$AVAILABILITY_ZONE</td></tr>" >> $OUT
+          echo "<tr><td>Hostname</td><td>$(hostname)</td><tr>" >> $OUT
+          echo "<tr><td>Private IP Addresses</td><td>$IP_ADDRESSES</td></tr>" >> $OUT
+          
+          echo "<tr><td>Security Groups</td><td><table border='1'><tr><th>Name</th><th>Id</th></tr>" >> $OUT
+          aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].SecurityGroups[]' --output text |
+          while read LINE
+          do
+            ID=$(echo $LINE | cut -d ' ' -f 1)
+            NAME=$(echo $LINE | cut -d ' ' -f 2)
+            echo "<tr><td>$NAME</td><td>$ID</td></tr>" >> $OUT
+          done
+          echo "</table></td></tr>" >> $OUT
+          
+          echo "<tr><td>Tags</td><td><table border='1'><tr><th>Name</th><th>Value</th></tr>" >> $OUT
+          aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].Tags[]' --output text | grep -v 'aws:' |
+          while read LINE
+          do
+            NAME=$(echo $LINE | cut -d ' ' -f 1)
+            VALUE=$(echo $LINE | cut -d ' ' -f 2)
+            echo "<tr><td>$NAME</td><td>$VALUE</td></tr>" >> $OUT
+          done
+          echo "</table></td></tr>" >> $OUT
+
+          echo "<tr><td>EBS Root volume</td><td><?php include '/readme.txt'; ?></td></tr>" >> $OUT
+          echo "<tr><td>EBS Data volume</td><td><?php include '/export/appl/data/readme.txt'; ?></td></tr>" >> $OUT
+          echo "<tr><td>EFS Data2 volume</td><td><?php include '/export/appl/data2/readme.txt'; ?></td></tr>" >> $OUT
+          echo "<tr><td>Spring Boot</td><td><?php echo \$hello; ?></td></tr>" >> $OUT
+          echo "</table></td></tr>" >> $OUT
+          
+          echo "</table></body></html>" >> $OUT
+          
+          systemctl start httpd
+          systemctl enable httpd
+
+  NetworkInterface1:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref Subnet1
+      GroupSet:
+        - !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-eni-1'
+
+  NetworkInterfaceAttachment1:
+    Type: AWS::EC2::NetworkInterfaceAttachment
+    Properties:
+      InstanceId: !Ref EC2Instance1
+      NetworkInterfaceId: !Ref NetworkInterface1
+      DeviceIndex: 1
+
+  EC2Instance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      KeyName: !Ref KeyPair
+      ImageId: !Ref AMI
+      InstanceType: t2.micro
+      SubnetId: !Ref Subnet2
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: MyEC2AdminRole 
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            Encrypted: true
+            KmsKeyId: !Ref KmsKey
+        - DeviceName: /dev/sdb
+          Ebs:
+            VolumeSize: 1
+            Encrypted: true
+            KmsKeyId: !Ref KmsKey
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-ec2-2'
+        - Key: CustomTag
+          Value: CustomTagEC2
+      PropagateTagsToVolumeOnCreation: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/sh
+          yum update -y
+          yum install amazon-efs-utils jq httpd php java-17-amazon-corretto -y
+
+          INSTANCE_ID=$(ec2-metadata -i | awk '{print $2}')
+          AMI_ID=$(ec2-metadata -a | awk '{print $2}')
+          aws configure set region ${AWS::Region}
+          aws ec2 modify-instance-metadata-options --instance-id $INSTANCE_ID --http-tokens required
+          AMI_DESCRIPTION=$(aws ec2 describe-images --image-id $AMI_ID | jq -r '.Images[0].Description')
+          INSTANCE_DETAIL=$(aws ec2 describe-instances --instance-id $INSTANCE_ID | jq '.Reservations[0].Instances[0]')
+          INSTANCE_TYPE=$(ec2-metadata -t | awk '{print $2}')
+          VPC_ID=$(echo $INSTANCE_DETAIL | jq -r '.VpcId')
+          SUBNET_ID=$(echo $INSTANCE_DETAIL | jq -r '.SubnetId')
+          AVAILABILITY_ZONE=$(ec2-metadata -z | awk '{print $2}')
+          IP_ADDRESSES=$(aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].NetworkInterfaces[].PrivateIpAddresses[].PrivateIpAddress' --output text)
+
+          mkdir -p /export/appl/data
+          mkfs -t xfs /dev/xvdb
+          echo "/dev/xvdb /export/appl/data xfs defaults,nofail 0 2" >> /etc/fstab
+          mkdir -p /export/appl/data2
+          echo "$(basename ${EFS.Arn}).efs.${AWS::Region}.amazonaws.com:/ /export/appl/data2 efs defaults 0 0" >> /etc/fstab
+          sleep 60
+          mount -a
+          
+          echo "test data file for EBS root volume created at $(date)" > /readme.txt
+          echo "test data file for EBS data volume created at $(date)" > /export/appl/data/readme.txt
+          echo "test data file for EFS data2 volume created at $(date)" > /export/appl/data2/readme.txt
+
+          cd /export/appl/data
+          wget https://github.com/cbkidwell/Hackamae-202404/raw/main/hello.jar
+
+          SERVICE=/etc/systemd/system/spring-boot-hello.service
+          echo "[Unit]" >> $SERVICE
+          echo "Description=SpringBoot Hello" >> $SERVICE
+          echo "After=syslog.target" >> $SERVICE
+          echo "[Service]" >> $SERVICE
+          echo "User=ec2-user" >> $SERVICE
+          echo "ExecStart=/bin/java -jar /export/appl/data/hello.jar" >> $SERVICE
+          echo "Restart=always" >> $SERVICE
+          echo "RestartSec=5" >> $SERVICE
+          echo "[Install]" >> $SERVICE
+          echo "WantedBy=multi-user.target" >> $SERVICE
+          systemctl enable spring-boot-hello.service
+          systemctl start spring-boot-hello.service
+
+          echo "<html><h1>Hello World</h1></html>" > /var/www/html/index.html
+
+          OUT=/var/www/html/index.php
+          echo "<?php" >> $OUT
+          echo "\$curl = curl_init();" >> $OUT
+          echo "curl_setopt(\$curl, CURLOPT_URL, 'http://localhost:8090/hello');" >> $OUT
+          echo "curl_setopt(\$curl, CURLOPT_RETURNTRANSFER, 1);" >> $OUT
+          echo "\$hello = curl_exec(\$curl);" >> $OUT
+          echo "curl_close(\$curl);" >> $OUT
+          echo "?>" >> $OUT
+
+          echo "<html><head><title>Hack-a-Mae Status</title></head><body>" >> $OUT
+          echo "<h2>Hack-a-Mae Status</h2>" >> $OUT
+          echo "<h3>Standalone EC2</h3>" >> $OUT
+          echo "<h4>$(date)</h4>" >> $OUT
+          
+          echo "<p><table border='1'><tr><th>Parameter</th><th>Value</th></tr>" >> $OUT
+          echo "<tr><td>Instance Id</td><td>$INSTANCE_ID</td></tr>" >> $OUT
+          echo "<tr><td>AMI Id</td><td>$AMI_ID</td></tr>" >> $OUT
+          echo "<tr><td>AMI Description</td><td>$AMI_DESCRIPTION</td></tr>" >> $OUT
+          echo "<tr><td>Instance Type</td><td>$INSTANCE_TYPE</td></tr>" >> $OUT
+          echo "<tr><td>VPC Id</td><td>$VPC_ID</td></tr>" >> $OUT
+          echo "<tr><td>Subnet Id</td><td>$SUBNET_ID</td></tr>" >> $OUT
+          echo "<tr><td>Availability Zone</td><td>$AVAILABILITY_ZONE</td></tr>" >> $OUT
+          echo "<tr><td>Hostname</td><td>$(hostname)</td><tr>" >> $OUT
+          echo "<tr><td>Private IP Addresses</td><td>$IP_ADDRESSES</td></tr>" >> $OUT
+          
+          echo "<tr><td>Security Groups</td><td><table border='1'><tr><th>Name</th><th>Id</th></tr>" >> $OUT
+          aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].SecurityGroups[]' --output text |
+          while read LINE
+          do
+            ID=$(echo $LINE | cut -d ' ' -f 1)
+            NAME=$(echo $LINE | cut -d ' ' -f 2)
+            echo "<tr><td>$NAME</td><td>$ID</td></tr>" >> $OUT
+          done
+          echo "</table></td></tr>" >> $OUT
+          
+          echo "<tr><td>Tags</td><td><table border='1'><tr><th>Name</th><th>Value</th></tr>" >> $OUT
+          aws ec2 describe-instances --instance-id $INSTANCE_ID --query 'Reservations[].Instances[].Tags[]' --output text | grep -v 'aws:' |
+          while read LINE
+          do
+            NAME=$(echo $LINE | cut -d ' ' -f 1)
+            VALUE=$(echo $LINE | cut -d ' ' -f 2)
+            echo "<tr><td>$NAME</td><td>$VALUE</td></tr>" >> $OUT
+          done
+          echo "</table></td></tr>" >> $OUT
+
+          echo "<tr><td>EBS Root volume</td><td><?php include '/readme.txt'; ?></td></tr>" >> $OUT
+          echo "<tr><td>EBS Data volume</td><td><?php include '/export/appl/data/readme.txt'; ?></td></tr>" >> $OUT
+          echo "<tr><td>EFS Data2 volume</td><td><?php include '/export/appl/data2/readme.txt'; ?></td></tr>" >> $OUT
+          echo "<tr><td>Spring Boot</td><td><?php echo \$hello; ?></td></tr>" >> $OUT
+
+          echo "</table></td></tr>" >> $OUT
+          
+          echo "</table></body></html>" >> $OUT
+          
+          systemctl start httpd
+          systemctl enable httpd
+
+  NetworkInterface2:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref Subnet2
+      GroupSet:
+        - !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub 'Team${TeamNumber}-eni-2'
+
+  NetworkInterfaceAttachment2:
+    Type: AWS::EC2::NetworkInterfaceAttachment
+    Properties:
+      InstanceId: !Ref EC2Instance2
+      NetworkInterfaceId: !Ref NetworkInterface2
+      DeviceIndex: 1
