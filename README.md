@@ -4,14 +4,14 @@
 ## Introduction
 This repository contains code and instructions for teams to setup their AWS environment for the Hack-a-Mae 3.0 event.
 
-Each team should receive an email with instructions on how to login to your AWS burner account. Note that access to the AWS burner account is not permitted from the Fannie Mae network, so you should forward the email to your personal email address and use your personal computer for access.
+Also included are instructions on how to login to your AWS burner account. Note that access to the AWS burner account is not permitted from the Fannie Mae network, so you should use your personal computer for access.
 
 Note that AWS burner accounts are only available for 3 days, so each team will receive 2 accounts. The first account is active April 12-15, and the second account is active April 15-18. Please plan accordingly to move your work to the second account on April 15 and use that account for presentations on April 17.
 
 
 ## Setup Instructions
 
-1. Click on the link provided in the email, review/accept the terms and conditions, and join the event. Links on the left side panel lead to AWS console and credentials if you choose to connect locally.
+1. Click on the link provided in the instructions, review/accept the terms and conditions, and join the event. Links on the left side panel lead to AWS console and credentials if you choose to connect locally.
 
 2. Open the AWS console and change region to us-east-1.
 
@@ -28,23 +28,19 @@ Note that AWS burner accounts are only available for 3 days, so each team will r
     - Add Administrator permission and click Next ![Screenshot of CloudFormation permission](/resources/create-cloudformation-role-2.png)
     - Enter MyCloudFormationAdminRole for the role name and click Create Role ![Screenshot of CloudFormation role](/resources/create-cloudformation-role-3.png)
 
-4. Create a personal account on [GitHub](https://github.com) if you do not already have one.
-
-5. Go to [HackAMae-3.0-Starter](https://github.com/r2ucrk/HackAMae-3.0-Starter/tree/main) repository and fork to your personal account.
-
-6. Update params.json to set values specific to your AWS burner account (available from VPC service in AWS console):
+4. Update params.json to set values specific to your AWS burner account (available from VPC service in AWS console):
   - VPC id ![Screenshot of VPC](/resources/vpc.png)
   - Subnet ids for 2 different subnets of your choosing ![Screenshot of subnets](/resources/subnets.png)
   - Default security group id ![Screenshot of security groups](/resources/security-group.png)
   - Team number (1-20)
     
 
-7. Create a new CI/CD pipeline
+5. Create a new CI/CD pipeline
   - Open the CodePipeline service and click Create Pipeline
   - Name the pipeline whatever you want and click Next ![Screenshot of CodePipeline step 1](/resources/codepipeline-1.png)
   - Select GitHub (Version 2) source provider
-  - Click Connect to GitHub and follow the prompts to connect to your personal account
-  - Select the repository and branch that you forked in step 5
+  - Click Connect to GitHub and follow the prompts to connect to your account
+  - Select the repository and branch assigned to your team
   - Select No filter trigger type and click Next ![Screenshot of CodePipline source stage](/resources/codepipeline-2.png)
   - Click Skip build stage
   - Select AWS CloudFormation for the deploy provider
