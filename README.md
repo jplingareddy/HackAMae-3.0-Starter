@@ -4,7 +4,7 @@
 ## Introduction
 This repository contains code and instructions for teams to setup their AWS environment for the Hack-a-Mae 3.0 event.
 
-Also included are instructions on how to login to your AWS burner account. Note that access to the AWS burner account is not permitted from the Fannie Mae network, so you should use your personal computer for access.
+Teams should have received an email with instructions on how to login to their AWS burner account. Note that access to the AWS burner account is not permitted from the Fannie Mae network, so you should use your personal computer for access.
 
 Note that AWS burner accounts are only available for 3 days, so each team will receive 2 accounts. The first account is active April 12-15, and the second account is active April 15-18. Please plan accordingly to move your work to the second account on April 15 and use that account for presentations on April 17.
 
