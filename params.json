@@ -1,9 +1,9 @@
 {
   "Parameters": {
-    "VPC": "vpc-003464ea4fcd2595b",
-    "Subnet1": "subnet-045317ba88b885fa9",
-    "Subnet2": "subnet-06f2d6f2d2a7bafb2",
-    "SecurityGroup": "sg-0ddac2b685b2569ad",
+    "VPC": "vpc-0aec7aa6ddfcb108d",
+    "Subnet1": "subnet-0e1247ecb045576d6",
+    "Subnet2": "subnet-04f69882a01c5705a",
+    "SecurityGroup": "sg-05561500447da9468",
     "TeamNumber": "1"
   }
 }
